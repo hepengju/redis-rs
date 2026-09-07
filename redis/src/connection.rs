@@ -28,6 +28,8 @@ use arcstr::ArcStr;
 use native_tls::{TlsConnector, TlsStream};
 
 #[cfg(feature = "tls-rustls")]
+use rustls::sign::{CertifiedKey, SingleCertAndKey};
+#[cfg(feature = "tls-rustls")]
 use rustls::{RootCertStore, StreamOwned};
 #[cfg(feature = "tls-rustls")]
 use std::sync::Arc;
@@ -1196,15 +1198,29 @@ pub(crate) fn create_rustls_config(
             client_key,
         }) = tls_params.client_tls_params
         {
-            config_builder
-                .with_client_auth_cert(client_cert, client_key)
+            // CertifiedKey::from_der (used by with_client_auth_cert) parses the chain with
+            // webpki and rejects X.509 v1. Use CertifiedKey::new + resolver so legacy PEM
+            // (e.g. OpenSSL 1.0.2 defaults) can still be sent during mTLS handshakes.
+            let provider = rustls::crypto::CryptoProvider::get_default().ok_or_else(|| {
+                RedisError::from((
+                    ErrorKind::InvalidClientConfig,
+                    "No crypto provider available for rustls",
+                ))
+            })?;
+            let signing_key = provider
+                .key_provider
+                .load_private_key(client_key)
                 .map_err(|err| {
                     RedisError::from((
                         ErrorKind::InvalidClientConfig,
-                        "Unable to build client with TLS parameters provided.",
+                        "Unable to load private key for TLS client authentication.",
                         err.to_string(),
                     ))
-                })?
+                })?;
+            let certified_key = CertifiedKey::new(client_cert, signing_key);
+            config_builder.with_client_cert_resolver(Arc::new(SingleCertAndKey::from(
+                certified_key,
+            )))
         } else {
             config_builder.with_no_client_auth()
         };
