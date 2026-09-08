@@ -78,6 +78,7 @@ struct BuilderParams {
     node_address_map: Option<HashMap<NodeAddress, NodeAddress>>,
     #[cfg(feature = "cluster-async")]
     max_connection_attempts: Option<NonZeroUsize>,
+    dialer: Option<Arc<dyn crate::ConnectionDialer>>,
 }
 
 #[derive(Clone)]
@@ -169,6 +170,7 @@ pub(crate) struct ClusterParams {
     pub(crate) node_address_map: Option<HashMap<NodeAddress, NodeAddress>>,
     #[cfg(feature = "cluster-async")]
     pub(crate) max_connection_attempts: Option<NonZeroUsize>,
+    pub(crate) dialer: Option<Arc<dyn crate::ConnectionDialer>>,
 }
 
 impl ClusterParams {
@@ -238,6 +240,7 @@ impl ClusterParams {
             node_address_map: value.node_address_map,
             #[cfg(feature = "cluster-async")]
             max_connection_attempts: value.max_connection_attempts,
+            dialer: value.dialer,
         })
     }
 
@@ -648,6 +651,14 @@ impl ClusterClientBuilder {
         self
     }
 
+    /// Sets a custom connection dialer used instead of connecting with TCP directly.
+    ///
+    /// The same dialer is used for every cluster node connection.
+    pub fn dialer(mut self, dialer: Arc<dyn crate::ConnectionDialer>) -> Self {
+        self.builder_params.dialer = Some(dialer);
+        self
+    }
+
     /// Sets a node address map for remapping cluster node addresses.
     ///
     /// In TLS-enabled clusters, nodes may advertise IP addresses via `CLUSTER SLOTS`,
@@ -769,6 +780,11 @@ impl ClusterClient {
         initial_nodes: impl IntoIterator<Item = T>,
     ) -> ClusterClientBuilder {
         ClusterClientBuilder::new(initial_nodes)
+    }
+
+    /// Returns the custom connection dialer, if one is set.
+    pub fn dialer(&self) -> Option<Arc<dyn crate::ConnectionDialer>> {
+        self.cluster_params.dialer.clone()
     }
 
     /// Creates new connections to Redis Cluster nodes and returns a

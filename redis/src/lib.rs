@@ -663,8 +663,9 @@ pub use crate::commands::{
     },
 };
 pub use crate::connection::{
-    Connection, ConnectionAddr, ConnectionInfo, ConnectionLike, IntoConnectionInfo, Msg, PubSub,
-    RedisConnectionInfo, TlsMode, parse_redis_url, transaction,
+    Connection, ConnectionAddr, ConnectionDialer, ConnectionInfo, ConnectionLike,
+    IntoConnectionInfo, Msg, PubSub, RedisConnectionInfo, RedisStream, TlsMode, parse_redis_url,
+    transaction,
 };
 pub use crate::parser::{Parser, parse_redis_value};
 pub use crate::pipeline::Pipeline;

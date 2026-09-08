@@ -182,6 +182,7 @@ pub(crate) fn get_connection_info(
             ..Default::default()
         },
         tcp_settings: cluster_params.tcp_settings.clone(),
+        dialer: cluster_params.dialer.clone(),
     }
 }
 
@@ -280,5 +281,41 @@ mod tests {
             }
             _ => panic!("expected Tcp connection addr"),
         }
+    }
+
+    #[test]
+    fn get_connection_info_copies_dialer() {
+        use crate::{ConnectionDialer, RedisStream};
+        use std::io;
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        struct NoopDialer;
+        impl ConnectionDialer for NoopDialer {
+            fn dial(
+                &self,
+                _host: &str,
+                _port: u16,
+                _timeout: Option<Duration>,
+            ) -> RedisResult<Box<dyn RedisStream>> {
+                Err(RedisError::from(io::Error::other("unused")))
+            }
+        }
+
+        let dialer: Arc<dyn ConnectionDialer> = Arc::new(NoopDialer);
+        let params = ClusterParams {
+            dialer: Some(dialer.clone()),
+            ..Default::default()
+        };
+        let info = get_connection_info(&NodeAddress::new("redis.example", 6379), &params);
+        let got = info.dialer().expect("dialer should be copied");
+        assert!(Arc::ptr_eq(&got, &dialer));
+
+        let client = crate::cluster::ClusterClient::builder(["redis://127.0.0.1:6379/"])
+            .dialer(dialer.clone())
+            .build()
+            .unwrap();
+        let got = client.dialer().expect("builder dialer should be stored");
+        assert!(Arc::ptr_eq(&got, &dialer));
     }
 }

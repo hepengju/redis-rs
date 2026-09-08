@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 #[cfg(feature = "aio")]
@@ -7,7 +8,9 @@ use crate::auth::StreamingCredentialsProvider;
 #[cfg(feature = "aio")]
 use crate::io::AsyncDNSResolver;
 use crate::{
-    connection::{Connection, ConnectionInfo, ConnectionLike, IntoConnectionInfo, connect},
+    connection::{
+        Connection, ConnectionDialer, ConnectionInfo, ConnectionLike, IntoConnectionInfo, connect,
+    },
     types::{RedisResult, Value},
 };
 #[cfg(feature = "aio")]
@@ -77,6 +80,19 @@ impl Client {
     /// Returns a reference of client connection info object.
     pub fn get_connection_info(&self) -> &ConnectionInfo {
         &self.connection_info
+    }
+
+    /// Sets a custom connection dialer used instead of connecting with TCP directly.
+    ///
+    /// Call this after [`Client::open`] (or after building a TLS client).
+    pub fn set_dialer(mut self, dialer: Arc<dyn ConnectionDialer>) -> Self {
+        self.connection_info = self.connection_info.set_dialer(dialer);
+        self
+    }
+
+    /// Returns the custom connection dialer, if one is set.
+    pub fn dialer(&self) -> Option<Arc<dyn ConnectionDialer>> {
+        self.connection_info.dialer()
     }
 
     /// Constructs a new `Client` with parameters necessary to create a TLS connection.
