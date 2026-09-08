@@ -186,6 +186,9 @@ pub struct SentinelNodeConnectionInfo {
 
     /// TCP settings for the connection.
     tcp_settings: Option<TcpSettings>,
+
+    /// Optional custom transport used for both sentinel nodes and discovered masters/replicas.
+    dialer: Option<std::sync::Arc<dyn crate::ConnectionDialer>>,
 }
 
 impl SentinelNodeConnectionInfo {
@@ -242,6 +245,7 @@ impl SentinelNodeConnectionInfo {
             addr,
             redis: self.redis_connection_info.clone().unwrap_or_default(),
             tcp_settings: self.tcp_settings.clone().unwrap_or_default(),
+            dialer: self.dialer.clone(),
         })
     }
 }
@@ -252,6 +256,7 @@ impl Default for &SentinelNodeConnectionInfo {
             tls_mode: None,
             redis_connection_info: None,
             tcp_settings: None,
+            dialer: None,
         };
         &DEFAULT_VALUE
     }
@@ -1490,6 +1495,7 @@ pub struct SentinelClientBuilder {
     server_type: SentinelServerType,
     client_to_redis_params: BuilderConnectionParams,
     client_to_sentinel_params: BuilderConnectionParams,
+    dialer: Option<std::sync::Arc<dyn crate::ConnectionDialer>>,
 }
 
 impl std::fmt::Debug for SentinelClientBuilder {
@@ -1546,6 +1552,7 @@ impl SentinelClientBuilder {
                 #[cfg(feature = "tls-rustls")]
                 certificates: None,
             },
+            dialer: None,
         })
     }
 
@@ -1573,6 +1580,7 @@ impl SentinelClientBuilder {
             tls_mode: self.client_to_redis_params.tls_mode,
             redis_connection_info: Some(client_to_redis_connection_info),
             tcp_settings: Some(self.client_to_redis_params.tcp_settings),
+            dialer: self.dialer.clone(),
         };
 
         for sentinel in &mut self.sentinels {
@@ -1660,6 +1668,7 @@ impl SentinelClientBuilder {
                 addr: connection_addr,
                 redis: client_to_sentinel_redis_connection_info.clone(),
                 tcp_settings: self.client_to_sentinel_params.tcp_settings.clone(),
+                dialer: self.dialer.clone(),
             })
             .collect();
 
@@ -1752,4 +1761,62 @@ impl SentinelClientBuilder {
         self.client_to_sentinel_params.certificates = Some(certificates);
         self
     }
+
+    /// Sets a custom connection dialer used for sentinel nodes and discovered masters/replicas.
+    pub fn set_dialer(mut self, dialer: std::sync::Arc<dyn crate::ConnectionDialer>) -> Self {
+        self.dialer = Some(dialer);
+        self
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn sentinel_set_dialer_is_copied_to_sentinel_and_master() {
+    use crate::{ConnectionDialer, RedisStream};
+    use std::io;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    struct NoopDialer;
+    impl ConnectionDialer for NoopDialer {
+        fn dial(
+            &self,
+            _host: &str,
+            _port: u16,
+            _timeout: Option<Duration>,
+        ) -> RedisResult<Box<dyn RedisStream>> {
+            Err(RedisError::from(io::Error::other("unused")))
+        }
+    }
+
+    let dialer: Arc<dyn ConnectionDialer> = Arc::new(NoopDialer);
+    let client = SentinelClientBuilder::new(
+        [ConnectionAddr::Tcp("sentinel.example".into(), 26379)],
+        "mymaster",
+        SentinelServerType::Master,
+    )
+    .unwrap()
+    .set_dialer(dialer.clone())
+    .build()
+    .unwrap();
+
+    let sentinel_info = &client.sentinel.sentinels_connection_info[0];
+    let got = sentinel_info
+        .dialer()
+        .expect("sentinel node should carry dialer");
+    assert!(Arc::ptr_eq(&got, &dialer));
+
+    let master = client
+        .node_connection_info
+        .create_connection_info(
+            "10.0.0.5".to_string(),
+            6379,
+            #[cfg(feature = "tls-rustls")]
+            &None,
+        )
+        .unwrap();
+    let got = master
+        .dialer()
+        .expect("master connection info should carry dialer");
+    assert!(Arc::ptr_eq(&got, &dialer));
 }

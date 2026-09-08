@@ -1,11 +1,12 @@
 use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::fmt;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::net::{self, SocketAddr, TcpStream, ToSocketAddrs};
 use std::ops::DerefMut;
 use std::path::PathBuf;
 use std::str::{FromStr, from_utf8};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::cmd::{Cmd, cmd, pipe};
@@ -31,8 +32,6 @@ use native_tls::TlsStream;
 use rustls::sign::{CertifiedKey, SingleCertAndKey};
 #[cfg(feature = "tls-rustls")]
 use rustls::{RootCertStore, StreamOwned};
-#[cfg(feature = "tls-rustls")]
-use std::sync::Arc;
 
 use crate::PushInfo;
 
@@ -312,8 +311,54 @@ impl fmt::Display for ConnectionAddr {
     }
 }
 
+/// A byte stream used as the transport for a Redis connection.
+///
+/// Timeout methods match [`TcpStream`]: they take `&self`.
+pub trait RedisStream: Read + Write + Send {
+    /// Sets the read timeout on this stream.
+    fn set_read_timeout(&self, dur: Option<Duration>) -> io::Result<()>;
+    /// Sets the write timeout on this stream.
+    fn set_write_timeout(&self, dur: Option<Duration>) -> io::Result<()>;
+}
+
+impl RedisStream for TcpStream {
+    fn set_read_timeout(&self, dur: Option<Duration>) -> io::Result<()> {
+        TcpStream::set_read_timeout(self, dur)
+    }
+
+    fn set_write_timeout(&self, dur: Option<Duration>) -> io::Result<()> {
+        TcpStream::set_write_timeout(self, dur)
+    }
+}
+
+impl RedisStream for Box<dyn RedisStream> {
+    fn set_read_timeout(&self, dur: Option<Duration>) -> io::Result<()> {
+        (**self).set_read_timeout(dur)
+    }
+
+    fn set_write_timeout(&self, dur: Option<Duration>) -> io::Result<()> {
+        (**self).set_write_timeout(dur)
+    }
+}
+
+/// Opens TCP connections to Redis (or a tunnel / proxy in front of Redis).
+///
+/// `host` is the raw string from [`ConnectionAddr`]; implementations must not
+/// resolve it with [`ToSocketAddrs`] before connecting.
+pub trait ConnectionDialer: Send + Sync + 'static {
+    /// Opens a stream to `host`:`port`.
+    ///
+    /// `timeout` is `None` when the caller used [`Client::get_connection`].
+    fn dial(
+        &self,
+        host: &str,
+        port: u16,
+        timeout: Option<Duration>,
+    ) -> RedisResult<Box<dyn RedisStream>>;
+}
+
 /// Holds the connection information that redis should use for connecting.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ConnectionInfo {
     /// A connection address for where to connect to.
     pub(crate) addr: ConnectionAddr,
@@ -322,6 +367,19 @@ pub struct ConnectionInfo {
     pub(crate) tcp_settings: TcpSettings,
     /// A redis connection info for how to handshake with redis.
     pub(crate) redis: RedisConnectionInfo,
+    /// Optional custom transport. `None` keeps the built-in TCP / TLS / Unix path.
+    pub(crate) dialer: Option<Arc<dyn ConnectionDialer>>,
+}
+
+impl fmt::Debug for ConnectionInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ConnectionInfo")
+            .field("addr", &self.addr)
+            .field("tcp_settings", &self.tcp_settings)
+            .field("redis", &self.redis)
+            .field("dialer", &self.dialer.as_ref().map(|_| "Some"))
+            .finish()
+    }
 }
 
 impl ConnectionInfo {
@@ -340,6 +398,11 @@ impl ConnectionInfo {
         &self.redis
     }
 
+    /// Returns the custom connection dialer, if one is set.
+    pub fn dialer(&self) -> Option<Arc<dyn ConnectionDialer>> {
+        self.dialer.clone()
+    }
+
     /// Sets the connection address for where to connect to.
     pub fn set_addr(mut self, addr: ConnectionAddr) -> Self {
         self.addr = addr;
@@ -355,6 +418,12 @@ impl ConnectionInfo {
     /// Set all redis connection info fields at once.
     pub fn set_redis_settings(mut self, redis: RedisConnectionInfo) -> Self {
         self.redis = redis;
+        self
+    }
+
+    /// Sets a custom connection dialer used instead of connecting with TCP directly.
+    pub fn set_dialer(mut self, dialer: Arc<dyn ConnectionDialer>) -> Self {
+        self.dialer = Some(dialer);
         self
     }
 }
@@ -511,6 +580,7 @@ impl IntoConnectionInfo for ConnectionAddr {
             addr: self,
             redis: Default::default(),
             tcp_settings: Default::default(),
+            dialer: None,
         })
     }
 }
@@ -542,6 +612,7 @@ where
             addr: ConnectionAddr::Tcp(self.0.into(), self.1),
             redis: RedisConnectionInfo::default(),
             tcp_settings: TcpSettings::default(),
+            dialer: None,
         })
     }
 }
@@ -687,6 +758,7 @@ fn url_to_tcp_connection_info(url: url::Url) -> RedisResult<ConnectionInfo> {
             lib_ver: None,
         },
         tcp_settings: TcpSettings::default(),
+        dialer: None,
     })
 }
 
@@ -713,6 +785,7 @@ fn url_to_unix_connection_info(url: url::Url) -> RedisResult<ConnectionInfo> {
             lib_ver: None,
         },
         tcp_settings: TcpSettings::default(),
+        dialer: None,
     })
 }
 
@@ -760,6 +833,23 @@ struct UnixConnection {
     open: bool,
 }
 
+struct CustomConnection {
+    reader: Box<dyn RedisStream>,
+    open: bool,
+}
+
+#[cfg(feature = "tls-rustls")]
+struct CustomTlsConnection {
+    reader: StreamOwned<rustls::ClientConnection, Box<dyn RedisStream>>,
+    open: bool,
+}
+
+#[cfg(all(feature = "tls-native-tls", not(feature = "tls-rustls")))]
+struct CustomNativeTlsConnection {
+    reader: TlsStream<Box<dyn RedisStream>>,
+    open: bool,
+}
+
 enum ActualConnection {
     Tcp(TcpConnection),
     #[cfg(all(feature = "tls-native-tls", not(feature = "tls-rustls")))]
@@ -768,6 +858,11 @@ enum ActualConnection {
     TcpRustls(Box<TcpRustlsConnection>),
     #[cfg(unix)]
     Unix(UnixConnection),
+    Custom(CustomConnection),
+    #[cfg(feature = "tls-rustls")]
+    CustomTls(Box<CustomTlsConnection>),
+    #[cfg(all(feature = "tls-native-tls", not(feature = "tls-rustls")))]
+    CustomNativeTls(Box<CustomNativeTlsConnection>),
 }
 
 #[cfg(feature = "tls-rustls-insecure")]
@@ -935,12 +1030,112 @@ pub struct Msg {
     pattern: Option<Value>,
 }
 
+fn connect_with_dialer(
+    dialer: &dyn ConnectionDialer,
+    addr: &ConnectionAddr,
+    timeout: Option<Duration>,
+) -> RedisResult<Option<ActualConnection>> {
+    Ok(Some(match addr {
+        ConnectionAddr::Tcp(host, port) => {
+            if is_wildcard_address(host) {
+                fail!((
+                    ErrorKind::InvalidClientConfig,
+                    "Cannot connect to a wildcard address (0.0.0.0 or ::)"
+                ));
+            }
+            ActualConnection::Custom(CustomConnection {
+                reader: dialer.dial(host, *port, timeout)?,
+                open: true,
+            })
+        }
+        #[cfg(feature = "tls-rustls")]
+        ConnectionAddr::TcpTls {
+            host,
+            port,
+            insecure,
+            tls_params,
+        } => {
+            if is_wildcard_address(host) {
+                fail!((
+                    ErrorKind::InvalidClientConfig,
+                    "Cannot connect to a wildcard address (0.0.0.0 or ::)"
+                ));
+            }
+            let stream = dialer.dial(host, *port, timeout)?;
+            let config = create_rustls_config(*insecure, tls_params.clone())?;
+            let conn = rustls::ClientConnection::new(
+                Arc::new(config),
+                rustls::pki_types::ServerName::try_from(host.as_str())?.to_owned(),
+            )?;
+            ActualConnection::CustomTls(Box::new(CustomTlsConnection {
+                reader: StreamOwned::new(conn, stream),
+                open: true,
+            }))
+        }
+        #[cfg(all(feature = "tls-native-tls", not(feature = "tls-rustls")))]
+        ConnectionAddr::TcpTls {
+            host,
+            port,
+            insecure,
+            tls_params,
+        } => {
+            if is_wildcard_address(host) {
+                fail!((
+                    ErrorKind::InvalidClientConfig,
+                    "Cannot connect to a wildcard address (0.0.0.0 or ::)"
+                ));
+            }
+            let tls_connector = if *insecure {
+                TlsConnector::builder()
+                    .danger_accept_invalid_certs(true)
+                    .danger_accept_invalid_hostnames(true)
+                    .use_sni(false)
+                    .build()?
+            } else if let Some(params) = tls_params {
+                TlsConnector::builder()
+                    .danger_accept_invalid_hostnames(params.danger_accept_invalid_hostnames)
+                    .build()?
+            } else {
+                TlsConnector::new()?
+            };
+            let stream = dialer.dial(host, *port, timeout)?;
+            let tls = match tls_connector.connect(host, stream) {
+                Ok(res) => res,
+                Err(native_tls::HandshakeError::Failure(err)) => {
+                    fail!((ErrorKind::Io, "SSL Handshake error", err.to_string()));
+                }
+                Err(_) => {
+                    fail!((ErrorKind::Io, "SSL Handshake error"));
+                }
+            };
+            ActualConnection::CustomNativeTls(Box::new(CustomNativeTlsConnection {
+                reader: tls,
+                open: true,
+            }))
+        }
+        #[cfg(not(any(feature = "tls-native-tls", feature = "tls-rustls")))]
+        ConnectionAddr::TcpTls { .. } => {
+            fail!((
+                ErrorKind::InvalidClientConfig,
+                "Cannot connect to TCP with TLS without the tls feature"
+            ));
+        }
+        ConnectionAddr::Unix(_) => return Ok(None),
+    }))
+}
+
 impl ActualConnection {
     pub fn new(
         addr: &ConnectionAddr,
         timeout: Option<Duration>,
         tcp_settings: &TcpSettings,
+        dialer: Option<&dyn ConnectionDialer>,
     ) -> RedisResult<Self> {
+        if let Some(dialer) = dialer
+            && let Some(con) = connect_with_dialer(dialer, addr, timeout)?
+        {
+            return Ok(con);
+        }
         Ok(match *addr {
             ConnectionAddr::Tcp(ref host, ref port) => {
                 if is_wildcard_address(host) {
@@ -1168,6 +1363,44 @@ impl ActualConnection {
                     Ok(_) => Ok(Value::Okay),
                 }
             }
+            Self::Custom(ref mut connection) => {
+                let result = connection.reader.write_all(bytes).map_err(RedisError::from);
+                match result {
+                    Err(e) => {
+                        if e.is_unrecoverable_error() {
+                            connection.open = false;
+                        }
+                        Err(e)
+                    }
+                    Ok(_) => Ok(Value::Okay),
+                }
+            }
+            #[cfg(feature = "tls-rustls")]
+            Self::CustomTls(ref mut connection) => {
+                let result = connection.reader.write_all(bytes).map_err(RedisError::from);
+                match result {
+                    Err(e) => {
+                        if e.is_unrecoverable_error() {
+                            connection.open = false;
+                        }
+                        Err(e)
+                    }
+                    Ok(_) => Ok(Value::Okay),
+                }
+            }
+            #[cfg(all(feature = "tls-native-tls", not(feature = "tls-rustls")))]
+            Self::CustomNativeTls(ref mut connection) => {
+                let result = connection.reader.write_all(bytes).map_err(RedisError::from);
+                match result {
+                    Err(e) => {
+                        if e.is_unrecoverable_error() {
+                            connection.open = false;
+                        }
+                        Err(e)
+                    }
+                    Ok(_) => Ok(Value::Okay),
+                }
+            }
         }
     }
 
@@ -1189,6 +1422,23 @@ impl ActualConnection {
             #[cfg(unix)]
             Self::Unix(UnixConnection { ref sock, .. }) => {
                 sock.set_write_timeout(dur)?;
+            }
+            Self::Custom(CustomConnection { ref reader, .. }) => {
+                reader.set_write_timeout(dur)?;
+            }
+            #[cfg(feature = "tls-rustls")]
+            Self::CustomTls(ref boxed_tls_connection) => {
+                boxed_tls_connection
+                    .reader
+                    .get_ref()
+                    .set_write_timeout(dur)?;
+            }
+            #[cfg(all(feature = "tls-native-tls", not(feature = "tls-rustls")))]
+            Self::CustomNativeTls(ref boxed_tls_connection) => {
+                boxed_tls_connection
+                    .reader
+                    .get_ref()
+                    .set_write_timeout(dur)?;
             }
         }
         Ok(())
@@ -1213,6 +1463,23 @@ impl ActualConnection {
             Self::Unix(UnixConnection { ref sock, .. }) => {
                 sock.set_read_timeout(dur)?;
             }
+            Self::Custom(CustomConnection { ref reader, .. }) => {
+                reader.set_read_timeout(dur)?;
+            }
+            #[cfg(feature = "tls-rustls")]
+            Self::CustomTls(ref boxed_tls_connection) => {
+                boxed_tls_connection
+                    .reader
+                    .get_ref()
+                    .set_read_timeout(dur)?;
+            }
+            #[cfg(all(feature = "tls-native-tls", not(feature = "tls-rustls")))]
+            Self::CustomNativeTls(ref boxed_tls_connection) => {
+                boxed_tls_connection
+                    .reader
+                    .get_ref()
+                    .set_read_timeout(dur)?;
+            }
         }
         Ok(())
     }
@@ -1226,6 +1493,11 @@ impl ActualConnection {
             Self::TcpRustls(ref boxed_tls_connection) => boxed_tls_connection.open,
             #[cfg(unix)]
             Self::Unix(UnixConnection { open, .. }) => open,
+            Self::Custom(CustomConnection { open, .. }) => open,
+            #[cfg(feature = "tls-rustls")]
+            Self::CustomTls(ref boxed_tls_connection) => boxed_tls_connection.open,
+            #[cfg(all(feature = "tls-native-tls", not(feature = "tls-rustls")))]
+            Self::CustomNativeTls(ref boxed_tls_connection) => boxed_tls_connection.open,
         }
     }
 }
@@ -1273,20 +1545,20 @@ pub(crate) fn create_rustls_config(
                     "No crypto provider available for rustls",
                 ))
             })?;
-            let signing_key = provider
-                .key_provider
-                .load_private_key(client_key)
-                .map_err(|err| {
-                    RedisError::from((
-                        ErrorKind::InvalidClientConfig,
-                        "Unable to load private key for TLS client authentication.",
-                        err.to_string(),
-                    ))
-                })?;
+            let signing_key =
+                provider
+                    .key_provider
+                    .load_private_key(client_key)
+                    .map_err(|err| {
+                        RedisError::from((
+                            ErrorKind::InvalidClientConfig,
+                            "Unable to load private key for TLS client authentication.",
+                            err.to_string(),
+                        ))
+                    })?;
             let certified_key = CertifiedKey::new(client_cert, signing_key);
-            config_builder.with_client_cert_resolver(Arc::new(SingleCertAndKey::from(
-                certified_key,
-            )))
+            config_builder
+                .with_client_cert_resolver(Arc::new(SingleCertAndKey::from(certified_key)))
         } else {
             config_builder.with_no_client_auth()
         };
@@ -1382,6 +1654,7 @@ pub fn connect(
         &connection_info.addr,
         timeout,
         &connection_info.tcp_settings,
+        connection_info.dialer.as_deref(),
     )?;
 
     // we temporarily set the timeout, and will remove it after finishing setup.
@@ -1928,6 +2201,18 @@ impl Connection {
                 let _ = connection.sock.shutdown(net::Shutdown::Both);
                 connection.open = false;
             }
+            ActualConnection::Custom(ref mut connection) => {
+                connection.open = false;
+            }
+            #[cfg(feature = "tls-rustls")]
+            ActualConnection::CustomTls(ref mut connection) => {
+                connection.open = false;
+            }
+            #[cfg(all(feature = "tls-native-tls", not(feature = "tls-rustls")))]
+            ActualConnection::CustomNativeTls(ref mut connection) => {
+                let _ = connection.reader.shutdown();
+                connection.open = false;
+            }
         }
     }
 
@@ -1952,6 +2237,19 @@ impl Connection {
                 #[cfg(unix)]
                 ActualConnection::Unix(UnixConnection { ref mut sock, .. }) => {
                     self.parser.parse_value(sock)
+                }
+                ActualConnection::Custom(CustomConnection { ref mut reader, .. }) => {
+                    self.parser.parse_value(reader)
+                }
+                #[cfg(feature = "tls-rustls")]
+                ActualConnection::CustomTls(ref mut boxed_tls_connection) => {
+                    let reader = &mut boxed_tls_connection.reader;
+                    self.parser.parse_value(reader)
+                }
+                #[cfg(all(feature = "tls-native-tls", not(feature = "tls-rustls")))]
+                ActualConnection::CustomNativeTls(ref mut boxed_tls_connection) => {
+                    let reader = &mut boxed_tls_connection.reader;
+                    self.parser.parse_value(reader)
                 }
             };
             self.try_send(&result);
@@ -2642,6 +2940,7 @@ mod tests {
                     addr: ConnectionAddr::Tcp("127.0.0.1".to_string(), 6379),
                     redis: Default::default(),
                     tcp_settings: TcpSettings::default(),
+                    dialer: None,
                 },
             ),
             (
@@ -2650,6 +2949,7 @@ mod tests {
                     addr: ConnectionAddr::Tcp("::1".to_string(), 6379),
                     redis: Default::default(),
                     tcp_settings: TcpSettings::default(),
+                    dialer: None,
                 },
             ),
             (
@@ -2666,6 +2966,7 @@ mod tests {
                         lib_ver: None,
                     },
                     tcp_settings: TcpSettings::default(),
+                    dialer: None,
                 },
             ),
             (
@@ -2674,6 +2975,7 @@ mod tests {
                     addr: ConnectionAddr::Tcp("127.0.0.1".to_string(), 6379),
                     redis: Default::default(),
                     tcp_settings: TcpSettings::default(),
+                    dialer: None,
                 },
             ),
             (
@@ -2690,6 +2992,7 @@ mod tests {
                         lib_ver: None,
                     },
                     tcp_settings: TcpSettings::default(),
+                    dialer: None,
                 },
             ),
         ];
@@ -2767,6 +3070,7 @@ mod tests {
                         lib_ver: None,
                     },
                     tcp_settings: Default::default(),
+                    dialer: None,
                 },
             ),
             (
@@ -2783,6 +3087,7 @@ mod tests {
                         lib_ver: None,
                     },
                     tcp_settings: TcpSettings::default(),
+                    dialer: None,
                 },
             ),
             (
@@ -2802,6 +3107,7 @@ mod tests {
                         lib_ver: None,
                     },
                     tcp_settings: TcpSettings::default(),
+                    dialer: None,
                 },
             ),
             (
@@ -2821,6 +3127,7 @@ mod tests {
                         lib_ver: None,
                     },
                     tcp_settings: TcpSettings::default(),
+                    dialer: None,
                 },
             ),
             (
@@ -2837,6 +3144,7 @@ mod tests {
                         lib_ver: None,
                     },
                     tcp_settings: TcpSettings::default(),
+                    dialer: None,
                 },
             ),
         ];
@@ -2897,6 +3205,108 @@ mod tests {
 
         // Check the connection setup pipeline
         assert_lib_name_in_connection_setup_pipeline(&redis_connection_info, "foo", "42.4711");
+    }
+
+    #[test]
+    fn connection_dialer_receives_raw_host_and_applies_timeouts() {
+        use std::sync::Mutex;
+
+        struct RecordingStream {
+            read_timeouts: Arc<Mutex<Vec<Option<Duration>>>>,
+        }
+
+        impl Read for RecordingStream {
+            fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::new(io::ErrorKind::UnexpectedEof, "mock eof"))
+            }
+        }
+        impl Write for RecordingStream {
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        impl RedisStream for RecordingStream {
+            fn set_read_timeout(&self, dur: Option<Duration>) -> io::Result<()> {
+                self.read_timeouts.lock().unwrap().push(dur);
+                Ok(())
+            }
+            fn set_write_timeout(&self, _dur: Option<Duration>) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        struct RecordingDialer {
+            calls: Arc<Mutex<Vec<(String, u16, Option<Duration>)>>>,
+            read_timeouts: Arc<Mutex<Vec<Option<Duration>>>>,
+        }
+
+        impl ConnectionDialer for RecordingDialer {
+            fn dial(
+                &self,
+                host: &str,
+                port: u16,
+                timeout: Option<Duration>,
+            ) -> RedisResult<Box<dyn RedisStream>> {
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push((host.to_string(), port, timeout));
+                Ok(Box::new(RecordingStream {
+                    read_timeouts: self.read_timeouts.clone(),
+                }))
+            }
+        }
+
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let read_timeouts = Arc::new(Mutex::new(Vec::new()));
+        let dialer = Arc::new(RecordingDialer {
+            calls: calls.clone(),
+            read_timeouts: read_timeouts.clone(),
+        });
+
+        let client = crate::Client::open("redis://my-redis.example:6380")
+            .unwrap()
+            .set_dialer(dialer);
+        let timeout = Duration::from_secs(2);
+        let _ = client.get_connection_with_timeout(timeout);
+
+        let recorded = calls.lock().unwrap();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].0, "my-redis.example");
+        assert_eq!(recorded[0].1, 6380);
+        assert_eq!(recorded[0].2, Some(timeout));
+
+        let timeouts = read_timeouts.lock().unwrap();
+        assert!(
+            timeouts.iter().any(|t| t.is_some()),
+            "set_read_timeout was not applied to the dialed stream: {timeouts:?}"
+        );
+    }
+
+    #[test]
+    fn connection_info_debug_shows_dialer_presence() {
+        struct NoopDialer;
+        impl ConnectionDialer for NoopDialer {
+            fn dial(
+                &self,
+                _host: &str,
+                _port: u16,
+                _timeout: Option<Duration>,
+            ) -> RedisResult<Box<dyn RedisStream>> {
+                Err(RedisError::from(io::Error::other("unused")))
+            }
+        }
+
+        let info = "redis://127.0.0.1".into_connection_info().unwrap();
+        assert!(format!("{info:?}").contains("dialer: None"));
+
+        let info = info.set_dialer(Arc::new(NoopDialer));
+        let debug = format!("{info:?}");
+        assert!(debug.contains("Some"), "{debug}");
+        assert!(crate::Client::open(info).unwrap().dialer().is_some());
     }
 }
 
