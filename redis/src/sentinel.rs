@@ -215,20 +215,16 @@ impl SentinelNodeConnectionInfo {
     ) -> RedisResult<ConnectionInfo> {
         let addr = match self.tls_mode {
             None => crate::ConnectionAddr::Tcp(ip, port),
-            Some(TlsMode::Secure) => crate::ConnectionAddr::TcpTls {
+            // Insecure skips server verification but must still attach client certs:
+            // Redis defaults to tls-auth-clients yes (CertificateRequired without mTLS).
+            Some(tls_mode) => crate::ConnectionAddr::TcpTls {
                 host: ip,
                 port,
-                insecure: false,
+                insecure: matches!(tls_mode, TlsMode::Insecure),
                 #[cfg(not(feature = "tls-rustls"))]
                 tls_params: None,
                 #[cfg(feature = "tls-rustls")]
                 tls_params: certs.as_ref().map(retrieve_tls_certificates).transpose()?,
-            },
-            Some(TlsMode::Insecure) => crate::ConnectionAddr::TcpTls {
-                host: ip,
-                port,
-                insecure: true,
-                tls_params: None,
             },
         };
 
@@ -1694,4 +1690,33 @@ fn sentinel_set_dialer_is_copied_to_sentinel_and_master() {
         .dialer()
         .expect("master connection info should carry dialer");
     assert!(Arc::ptr_eq(&got, &dialer));
+}
+
+#[cfg(feature = "tls-rustls")]
+#[test]
+fn sentinel_insecure_tls_keeps_certificates_for_mtls() {
+    use crate::{ConnectionAddr, TlsCertificates, TlsMode};
+
+    let info = SentinelNodeConnectionInfo::default().set_tls_mode(TlsMode::Insecure);
+    let certs = Some(TlsCertificates {
+        client_tls: None,
+        root_cert: None,
+    });
+    let conn = info
+        .create_connection_info("10.0.0.5".to_string(), 6379, &certs)
+        .unwrap();
+    match conn.addr {
+        ConnectionAddr::TcpTls {
+            insecure,
+            tls_params,
+            ..
+        } => {
+            assert!(insecure);
+            assert!(
+                tls_params.is_some(),
+                "Insecure TLS must still attach certificates so Redis tls-auth-clients yes can succeed"
+            );
+        }
+        other => panic!("expected TcpTls, got {other:?}"),
+    }
 }
