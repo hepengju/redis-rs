@@ -10,13 +10,7 @@ Rust 包名是 `redis-me-rs`，库名仍是 `redis`，业务代码继续 `use re
 
 这是 1.7.0（`2a29a8f`，与标签 `redis-1.7.0` 相同）之后的 1.7.1、1.8.0、1.8.1。不要跟到 `2.0.0-rc`。
 
-本地 `main` 指向这个标签。`redis-me` 上的提交都叠在它上面。用 Clash 混合端口 `127.0.0.1:7900` 拉取后，已和标签树对齐。不要用源码压缩包在 Windows 上覆盖工作区，那会把测试夹具的换行改成 CRLF，并丢掉 `connection.rs`、`release.sh` 的可执行位。
-
-`~/.ssh/config` 里 `github.com` 仍走 SOCKS `127.0.0.1:7897`。这个端口当前没有监听，SSH 拉取会失败。拉上游用 HTTPS，并显式指定 7900，不要改全局 git 配置：
-
-```bash
-git -c http.proxy=http://127.0.0.1:7900 fetch https://github.com/redis-rs/redis-rs.git tag redis-1.8.1
-```
+本地 `main` 指向这个标签。`redis-me` 上的提交都叠在它上面，树已经和标签对齐。不要用源码压缩包覆盖工作区，那会把测试夹具的换行改成 CRLF，并丢掉 `connection.rs`、`release.sh` 的可执行位。
 
 ## 相对上游的改动
 
@@ -47,7 +41,7 @@ cargo publish -p redis-me-rs --registry crates-io
 
 ## 下次同步
 
-1. 用上面的 HTTPS 命令把新标签抓下来，例如 `redis-1.8.2`。先看 changelog，确认不是 2.0。
+1. 从上游把新标签抓下来，例如 `redis-1.8.2`。先看 changelog，确认不是 2.0。
 2. 把 `redis-me` 上「旧标签之后」的提交接到新标签上：
 
 ```bash
