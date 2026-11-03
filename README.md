@@ -1,307 +1,64 @@
-# redis-rs
+# redis-me
 
-[![Rust](https://github.com/redis-rs/redis-rs/actions/workflows/rust.yml/badge.svg)](https://github.com/redis-rs/redis-rs/actions/workflows/rust.yml)
-[![crates.io](https://img.shields.io/crates/v/redis.svg)](https://crates.io/crates/redis)
-[![Chat](https://img.shields.io/discord/976380008299917365?logo=discord)](https://discord.gg/WHKcJK9AKP)
+RedisME 使用的 [redis-rs](https://github.com/redis-rs/redis-rs) fork。只维护分支 `redis-me`。
 
-Redis-rs is a Rust library implementing a high-level client for Redis, Valkey
-and any other RESP (Redis Serialization Protocol) compliant DB server. It
-provides convenient access to all Redis functionality through a very flexible
-but low-level API. It uses a customizable type conversion trait so that any
-operation can return results in just the type you are expecting. This makes for
-a very pleasant development experience.
+Rust 包名是 `redis-me-rs`，库名仍是 `redis`，业务代码继续 `use redis::...`。crates.io 上的 `redis` 属于上游，不能用这个名字发布。
 
-Most Redis and Valkey version should work, but CI runs against Redis 6+
-and Valkey 7+.
+## 当前基线
 
-The crate is called `redis` and you can depend on it via cargo:
+上游标签 **`redis-1.8.1`**，提交 `d8863e6001bc94423135a2258311c65f2163c6ab`（2026-10-30，`Prepare version`）。
 
-```ini
-[dependencies]
-redis = "1"
-```
+这是 1.7.0（`2a29a8f`，与标签 `redis-1.7.0` 相同）之后的 1.7.1、1.8.0、1.8.1。不要跟到 `2.0.0-rc`。
 
-Documentation on the library can be found at
-[docs.rs/redis](https://docs.rs/redis).
+本地 `main` 指向这个标签。`redis-me` 上的提交都叠在它上面。用 Clash 混合端口 `127.0.0.1:7900` 拉取后，已和标签树对齐。不要用源码压缩包在 Windows 上覆盖工作区，那会把测试夹具的换行改成 CRLF，并丢掉 `connection.rs`、`release.sh` 的可执行位。
 
-
-## Basic Operation
-
-To open a connection you need to create a client and then to fetch a
-connection from it.
-
-Many commands are implemented through the `TypedCommands` or `Commands` traits but manual
-command creation is also possible. The `TypedCommands` trait provides pre-specified and opinionated return value types to commands,
-but if you want to use other return value types, you can use `Commands` as long as the chosen return value type
-implements the `FromRedisValue` trait.
-
-```rust
-use redis::TypedCommands;
-
-fn fetch_an_integer() -> Option<isize> {
-    // connect to redis
-    let client = redis::Client::open("redis://127.0.0.1/")?;
-    let mut con = client.get_connection()?;
-    // `set` returns a `()`, so we don't need to specify the return type manually unlike in the previous example.
-    con.set("my_key", 42)?;
-    // `get_int` returns Option<isize>, as the key may not be found.
-    con.get_int("my_key").unwrap()
-}
-```
-
-```rust
-use redis::Commands;
-
-fn fetch_an_integer() -> redis::RedisResult<isize> {
-    // connect to redis
-    let client = redis::Client::open("redis://127.0.0.1/")?;
-    let mut con = client.get_connection()?;
-    // throw away the result, just make sure it does not fail
-    let _: () = con.set("my_key", 42)?;
-    // read back the key and return it.  Because the return value
-    // from the function is a result for integer this will automatically
-    // convert into one.
-    con.get("my_key")
-}
-```
-
-Variables are converted to and from the Redis format for a wide variety of types
-(`String`, num types, tuples, `Vec<u8>`). If you want to use it with your own types,
-you can implement the `FromRedisValue` and `ToRedisArgs` traits, or derive it with the
-[redis-macros](https://github.com/daniel7grant/redis-macros/#json-wrapper-with-redisjson) crate.
-
-## Async support
-
-To enable asynchronous clients, enable the relevant feature in your Cargo.toml,
-`tokio-comp` for tokio users, `smol-comp` for smol users.
-
-```
-# if you use tokio
-redis = { version = "1", features = ["tokio-comp"] }
-
-# if you use smol
-redis = { version = "1", features = ["smol-comp"] }
-```
-
-You can then use either the `AsyncTypedCommands` or `AsyncCommands` traits. All async connections are cheap to clone, and clones can be used concurrently from multiple threads.
-
-## Connection Pooling
-
-When using a sync connection, it is recommended to use a connection pool in order to handle
-disconnects or multi-threaded usage. This can be done using the `r2d2` feature.
-
-```
-redis = { version = "1", features = ["r2d2"] }
-```
-
-For async connections, connection pooling isn't necessary, unless blocking commands are used.
-The `MultiplexedConnection` is cheaply cloneable and can be used safely from multiple threads, so a 
-single connection can be easily reused. For automatic reconnections consider using 
-`ConnectionManager` with the `connection-manager` feature.
-Async cluster connections also don't require pooling and are thread-safe and reusable.
-
-Multiplexing won't help if blocking commands are used since the server won't handle commands
-from blocked connections until the connection is unblocked. If you want to be able to handle
-non-blocking commands concurrently with blocking commands, you should send the blocking
-commands on another connection.
-
-## TLS Support
-
-To enable TLS support, you need to use the relevant feature entry in your Cargo.toml.
-Currently, `native-tls` and `rustls` are supported.
-
-To use `native-tls`:
-
-```
-redis = { version = "1", features = ["tls-native-tls"] }
-
-# if you use tokio
-redis = { version = "1", features = ["tokio-native-tls-comp"] }
-
-# if you use smol
-redis = { version = "1", features = ["smol-native-tls-comp"] }
-```
-
-To use `rustls`:
-
-```
-redis = { version = "1", features = ["tls-rustls"] }
-
-# if you use tokio
-redis = { version = "1", features = ["tokio-rustls-comp"] }
-
-# if you use smol
-redis = { version = "1", features = ["smol-rustls-comp"] }
-```
-
-Add `rustls` to dependencies
-
-```
-rustls = { version = "0.23" }
-```
-
-And then, before creating a connection, ensure that you install a crypto provider. For example:
-
-```rust
-    rustls::crypto::aws_lc_rs::default_provider()
-        .install_default()
-        .expect("Failed to install rustls crypto provider");
-```
-
-
-With `rustls`, you can add the following feature flags on top of other feature flags to enable additional features:
-
--   `tls-rustls-insecure`: Allow insecure TLS connections
--   `tls-rustls-webpki-roots`: Use `webpki-roots` (Mozilla's root certificates) instead of native root certificates
-
-then you should be able to connect to a redis instance using the `rediss://` URL scheme:
-
-```rust
-let client = redis::Client::open("rediss://127.0.0.1/")?;
-```
-
-To enable insecure mode, append `#insecure` at the end of the URL:
-
-```rust
-let client = redis::Client::open("rediss://127.0.0.1/#insecure")?;
-```
-
-## Token-Based Authentication with Azure Entra ID
-
-Redis-rs supports token-based authentication using Azure Entra ID, providing secure, dynamic authentication for Redis connections. This feature is particularly useful for Azure-hosted applications and enterprise environments.
-
-To enable Entra ID authentication, add the `entra-id` feature to your Cargo.toml:
-
-```toml
-redis = { version = "1", features = ["entra-id", "tokio-comp"] }
-```
-
-### Supported Authentication Flows
-
-- **DeveloperToolsCredential**: Authenticates through developer tools such as the Azure CLI.
-It tries the following credential types, in this order, stopping when one provides a token:
-* [`AzureCliCredential`]
-* [`AzureDeveloperCliCredential`]
-`DeveloperToolsCredential` uses the first credential that provides a token for all subsequent token requests. It never tries the others again.
-- **Service Principal**: `Client secret` and `certificate-based` authentication
-- **Managed Identity**: `System-assigned` or `user-assigned` managed identities
-- **Custom Credentials**: Support for any `TokenCredential` implementation
-
-### Features
-
-- **Automatic Token Refresh & Streaming of Credentials**: Seamlessly handle token expiration and stream updated credentials to prevent connection errors due to token expiration
-- **Configurable Refresh Policies**: Customizable refresh thresholds and retry behavior
-
-### Async-First Design
-- Full async/await support for non-blocking operations
-- Seamless integration with multiplexed connections
-
-## Cluster Support
-
-Support for Redis Cluster can be enabled by enabling the `cluster` feature in your Cargo.toml:
-
-`redis = { version = "1", features = [ "cluster"] }`
-
-Then you can simply use the `ClusterClient`, which accepts a list of available nodes. Note
-that only one node in the cluster needs to be specified when instantiating the client, though
-you can specify multiple.
-
-```rust
-use redis::cluster::ClusterClient;
-use redis::TypedCommands;
-
-fn fetch_an_integer() -> String {
-    let nodes = vec!["redis://127.0.0.1/"];
-    let client = ClusterClient::new(nodes).unwrap();
-    let mut connection = client.get_connection().unwrap();
-    connection.set("test", "test_data").unwrap();
-    return connection.get("test").unwrap();
-}
-```
-
-Async Redis Cluster support can be enabled by enabling the `cluster-async` feature, along
-with your preferred async runtime, e.g.:
-
-`redis = { version = "1", features = [ "cluster-async", "tokio-comp" ] }`
-
-```rust
-use redis::cluster::ClusterClient;
-use redis::AsyncTypedCommands;
-
-async fn fetch_an_integer() -> String {
-    let nodes = vec!["redis://127.0.0.1/"];
-    let client = ClusterClient::new(nodes).unwrap();
-    let mut connection = client.get_async_connection().await.unwrap();
-    connection.set("test", "test_data").await.unwrap();
-    return connection.get("test").await.unwrap();
-}
-```
-
-## JSON Support
-
-Support for the RedisJSON Module can be enabled by specifying "json" as a feature in your Cargo.toml.
-
-`redis = { version = "1", features = ["json"] }`
-
-Then you can simply import the `JsonCommands` trait which will add the `json` commands to all Redis Connections (not to be confused with just `Commands` which only adds the default commands)
-
-```rust
-use redis::Client;
-use redis::JsonCommands;
-use redis::RedisResult;
-use redis::ToRedisArgs;
-
-// Result returns Ok(true) if the value was set
-// Result returns Err(e) if there was an error with the server itself OR serde_json was unable to serialize the boolean
-fn set_json_bool<P: ToRedisArgs>(key: P, path: P, b: bool) -> RedisResult<bool> {
-    let client = Client::open("redis://127.0.0.1").unwrap();
-    let connection = client.get_connection().unwrap();
-
-    // runs `JSON.SET {key} {path} {b}`
-    connection.json_set(key, path, b)?
-}
-
-```
-
-To parse the results, you'll need to use `serde_json` (or some other json lib) to deserialize
-the results from the bytes. It will always be a `Vec`, if no results were found at the path it'll
-be an empty `Vec`. If you want to handle deserialization and `Vec` unwrapping automatically,
-you can use the `Json` wrapper from the
-[redis-macros](https://github.com/daniel7grant/redis-macros/#json-wrapper-with-redisjson) crate.
-
-## Testing
- 
- The [`redis-test`](https://docs.rs/redis-test) crate provides tools for testing Redis clients.
- It includes a `MockRedisConnection` for unit testing without a real Redis server,
- as well as helpers like `RedisCluster` and `RedisSentinelCluster` to easily spin up
- local Redis clusters and Sentinels for integration tests.
- 
- ## Webassembly Support
-
-redis-rs tests that WebAssembly successfully builds for the sync client. Async
-clients on `wasm32-wasip2` are supported via the existing `tokio-comp` feature
-and [Tokio's wasm32-wasip2 networking](https://github.com/tokio-rs/tokio/pull/7933)
-(Tokio 1.51+).
-
-Build requirements for `wasm32-wasip2` with `tokio-comp`:
-
-- `rustup target add wasm32-wasip2`
-- Tokio 1.51 or newer in your dependency graph
-- `RUSTFLAGS="--cfg tokio_unstable"` (required by Tokio for WASIp2 until stabilized)
-- A `current_thread` Tokio runtime (WASIp2 is single-threaded)
-- A WASM host with network access (e.g. `wasmtime -S inherit-network`)
+`~/.ssh/config` 里 `github.com` 仍走 SOCKS `127.0.0.1:7897`。这个端口当前没有监听，SSH 拉取会失败。拉上游用 HTTPS，并显式指定 7900，不要改全局 git 配置：
 
 ```bash
-RUSTFLAGS="--cfg tokio_unstable" cargo build -p redis \
-  --target wasm32-wasip2 \
-  --no-default-features \
-  --features tokio-comp
+git -c http.proxy=http://127.0.0.1:7900 fetch https://github.com/redis-rs/redis-rs.git tag redis-1.8.1
 ```
 
-This uses the standard `tokio-comp` code path — no redis-rs-specific WASI transport layer.
+## 相对上游的改动
 
-CI currently only verifies that redis-rs compiles for WebAssembly targets.
+只动连接和 TLS，方便 RedisME 的旧客户端证书、SSH 隧道和 HTTP/SOCKS 代理。
 
-## Development
+| 改动 | 行为 | 位置 |
+|---|---|---|
+| X.509 v1 客户端证书 | `tls-rustls` 下不再走 `with_client_auth_cert`（webpki 会拒绝 v1）。改为 `CertifiedKey::new` + `with_client_cert_resolver`，OpenSSL 1.0.2 默认签发的 PEM 仍能做 mTLS | `redis/src/connection.rs` |
+| `ConnectionDialer` | 同步建连可换成自定义传输。`host` 保持地址里的原始字符串，不先做 `ToSocketAddrs`。未设置时与上游一致。Dialer 返回明文流，`rediss://` 仍由 redis-rs 在流上包 TLS | `connection.rs` 的 `ConnectionDialer` / `RedisStream`；`Client::set_dialer`；`ClusterClientBuilder::dialer`（每个集群节点共用）；`SentinelClientBuilder::set_dialer`（哨兵节点和发现出的主从都走它） |
+| 哨兵 Insecure TLS 保留客户端证书 | `TlsMode::Insecure` 只跳过服务端校验，仍然附上 `TlsCertificates`。Redis 默认 `tls-auth-clients yes`，不带客户端证书会在握手阶段失败 | `redis/src/sentinel.rs` 的 `create_connection_info` |
+| 适配 1.8 的 `Debug` | 1.8 为集群参数和哨兵 builder 写了穷尽拆解的 `Debug`。`ConnectionDialer` 没有 `Debug`，这里用「有没有设置」来打印，避免编译失败，也避免 dialer 在转换时被丢掉 | `cluster_handling/client.rs`、`sentinel.rs` |
+| 发布名和许可证文件 | 包名 `redis-me-rs`，`[lib] name = "redis"`。`redis/LICENSE` 改成许可证正文。上游这里是指向仓库根目录的符号链接，在 Windows 上打包会变成字面量 `../LICENSE` | `redis/Cargo.toml`、`redis/LICENSE`、`Cargo.lock`、`redis-test` 与 `afl/parser` 的 path 依赖 |
 
-See [DEVELOPMENT.md](DEVELOPMENT.md)
+RedisME 依赖：
+
+```toml
+redis = { package = "redis-me-rs", version = "1.8.1", features = [
+  "acl", "cluster", "sentinel", "json", "vector-sets",
+  "tls-rustls", "tls-rustls-insecure",
+] }
+```
+
+本机 Cargo 把 crates.io 换成了 rsproxy，发布时要写明 registry：
+
+```bash
+cargo publish -p redis-me-rs --registry crates-io
+```
+
+## 下次同步
+
+1. 用上面的 HTTPS 命令把新标签抓下来，例如 `redis-1.8.2`。先看 changelog，确认不是 2.0。
+2. 把 `redis-me` 上「旧标签之后」的提交接到新标签上：
+
+```bash
+git rebase --onto redis-1.8.2 redis-1.8.1 redis-me
+```
+
+3. 冲突优先看 `redis/src/connection.rs`、`redis/src/sentinel.rs`、`redis/src/cluster_handling/client.rs`。上游的 TLS、哨兵和 `Debug` 改动留下；上表里的 dialer、v1 证书解析器、Insecure TLS 仍附带客户端证书也留下。
+4. 编译并跑 fork 自己的单测：
+
+```bash
+cargo test -p redis-me-rs --features "acl,cluster,sentinel,json,vector-sets,tls-rustls,tls-rustls-insecure" --lib -- connection_dialer connection_info_debug get_connection_info_copies_dialer sentinel_set_dialer sentinel_insecure
+```
+
+5. 若只改了 fork、上游还没有新版本，把 `redis/Cargo.toml` 的版本号往上加一档再发布。版本号属于 `redis-me-rs`，和官方 `redis` 互不影响。
