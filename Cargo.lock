@@ -1113,7 +1113,7 @@ name = "fuzz-target-parser"
 version = "0.1.0"
 dependencies = [
  "afl",
- "redis",
+ "redis-me-rs",
 ]
 
 [[package]]
@@ -2136,7 +2136,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "redis"
+name = "redis-me-rs"
 version = "1.8.2"
 dependencies = [
  "ahash 0.8.11",
@@ -2210,7 +2210,7 @@ dependencies = [
  "bytes",
  "futures",
  "rand 0.10.2",
- "redis",
+ "redis-me-rs",
  "socket2 0.6.4",
  "tempfile",
  "tokio",
