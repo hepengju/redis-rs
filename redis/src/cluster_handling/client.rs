@@ -115,6 +115,7 @@ impl std::fmt::Debug for BuilderParams {
             node_address_map,
             #[cfg(feature = "cluster-async")]
             max_connection_attempts,
+            dialer,
         } = self;
 
         let mut str = f.debug_struct("BuilderParams");
@@ -128,7 +129,8 @@ impl std::fmt::Debug for BuilderParams {
             .field("database_id", database_id)
             .field("tcp_settings", tcp_settings)
             .field("node_address_map", node_address_map)
-            .field("read_routing_factory", &set_or_unset(read_routing_factory));
+            .field("read_routing_factory", &set_or_unset(read_routing_factory))
+            .field("dialer", &set_or_unset(dialer));
 
         #[cfg(feature = "tls-rustls")]
         str.field("certs", &redacted_if_set(certs));
@@ -280,6 +282,7 @@ impl std::fmt::Debug for ClusterParams {
             node_address_map,
             #[cfg(feature = "cluster-async")]
             max_connection_attempts,
+            dialer,
         } = self;
 
         let mut str = f.debug_struct("ClusterParams");
@@ -294,7 +297,8 @@ impl std::fmt::Debug for ClusterParams {
             .field("database_id", database_id)
             .field("tcp_settings", tcp_settings)
             .field("node_address_map", node_address_map)
-            .field("read_routing_factory", &set_or_unset(read_routing_factory));
+            .field("read_routing_factory", &set_or_unset(read_routing_factory))
+            .field("dialer", &set_or_unset(dialer));
 
         #[cfg(feature = "cluster-async")]
         str.field("overall_response_timeout", overall_response_timeout)

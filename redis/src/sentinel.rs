@@ -175,7 +175,7 @@ pub struct Sentinel {
 
 /// Holds the connection information that a sentinel should use when connecting to the
 /// servers (masters and replicas) belonging to it.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct SentinelNodeConnectionInfo {
     /// The TLS mode of the connection, or None if we do not want to connect using TLS
     /// (just a plain TCP connection).
@@ -189,6 +189,17 @@ pub struct SentinelNodeConnectionInfo {
 
     /// Optional custom transport used for both sentinel nodes and discovered masters/replicas.
     dialer: Option<std::sync::Arc<dyn crate::ConnectionDialer>>,
+}
+
+impl std::fmt::Debug for SentinelNodeConnectionInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SentinelNodeConnectionInfo")
+            .field("tls_mode", &self.tls_mode)
+            .field("redis_connection_info", &self.redis_connection_info)
+            .field("tcp_settings", &self.tcp_settings)
+            .field("dialer", &crate::types::set_or_unset(&self.dialer))
+            .finish()
+    }
 }
 
 impl SentinelNodeConnectionInfo {
@@ -1502,6 +1513,7 @@ impl std::fmt::Debug for SentinelClientBuilder {
             server_type,
             client_to_redis_params,
             client_to_sentinel_params,
+            dialer,
         } = self;
 
         f.debug_struct("SentinelClientBuilder")
@@ -1510,6 +1522,7 @@ impl std::fmt::Debug for SentinelClientBuilder {
             .field("server_type", server_type)
             .field("client_to_redis_params", client_to_redis_params)
             .field("client_to_sentinel_params", client_to_sentinel_params)
+            .field("dialer", &crate::types::set_or_unset(dialer))
             .finish()
     }
 }
