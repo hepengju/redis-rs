@@ -6,9 +6,9 @@ Rust 包名是 `redis-me-rs`，库名仍是 `redis`，业务代码继续 `use re
 
 ## 当前基线
 
-上游标签 **`redis-1.8.1`**，提交 `d8863e6001bc94423135a2258311c65f2163c6ab`（2026-10-30，`Prepare version`）。
+上游标签 **`redis-1.8.2`**，提交 `58e0c27097d878773d043bec5c8ed13c1e9c3b03`（2026-11-14，`Prepare Version 1.8.2`）。
 
-这是 1.7.0（`2a29a8f`，与标签 `redis-1.7.0` 相同）之后的 1.7.1、1.8.0、1.8.1。不要跟到 `2.0.0-rc`。
+这是 1.8.1 之后的补丁版（解析失败时关掉同步连接、集群 MOVED/ASK、客户端缓存等）。不要跟到 `2.0`。
 
 本地 `main` 指向这个标签。`redis-me` 上的提交都叠在它上面，树已经和标签对齐。不要用源码压缩包覆盖工作区，那会把测试夹具的换行改成 CRLF，并丢掉 `connection.rs`、`release.sh` 的可执行位。
 
@@ -27,7 +27,7 @@ Rust 包名是 `redis-me-rs`，库名仍是 `redis`，业务代码继续 `use re
 RedisME 依赖：
 
 ```toml
-redis = { package = "redis-me-rs", version = "1.8.1", features = [
+redis = { package = "redis-me-rs", version = "1.8.2", features = [
   "acl", "cluster", "sentinel", "json", "vector-sets",
   "tls-rustls", "tls-rustls-insecure",
 ] }
@@ -41,11 +41,11 @@ cargo publish -p redis-me-rs --registry crates-io
 
 ## 下次同步
 
-1. 从上游把新标签抓下来，例如 `redis-1.8.2`。先看 changelog，确认不是 2.0。
+1. 从上游把新标签抓下来，例如 `redis-1.8.3`。先看 changelog，确认不是 2.0。
 2. 把 `redis-me` 上「旧标签之后」的提交接到新标签上：
 
 ```bash
-git rebase --onto redis-1.8.2 redis-1.8.1 redis-me
+git rebase --onto redis-1.8.3 redis-1.8.2 redis-me
 ```
 
 3. 冲突优先看 `redis/src/connection.rs`、`redis/src/sentinel.rs`、`redis/src/cluster_handling/client.rs`。上游的 TLS、哨兵和 `Debug` 改动留下；上表里的 dialer、v1 证书解析器、Insecure TLS 仍附带客户端证书也留下。
